@@ -18,7 +18,7 @@ from loguru import logger
 _package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_package_dir, ".env"))
 
-from .api.client import OnshapeClient, OnshapeCredentials
+from .api.client import OnshapeClient, OnshapeCredentials, OnshapeOAuthCredentials
 from .api.partstudio import PartStudioManager
 from .api.variables import VariableManager
 from .api.documents import DocumentManager
@@ -159,12 +159,29 @@ list_entities, or from create_offset_plane).
 
 app = Server("onshape-mcp", instructions=_INSTRUCTIONS)
 
-# Initialize Onshape client. Accept both naming conventions: upstream uses
-# ONSHAPE_ACCESS_KEY/SECRET_KEY, Onshape's developer portal examples use
-# ONSHAPE_API_KEY/SECRET. Fall back from the former to the latter.
-_ak = os.getenv("ONSHAPE_ACCESS_KEY") or os.getenv("ONSHAPE_API_KEY", "")
-_sk = os.getenv("ONSHAPE_SECRET_KEY") or os.getenv("ONSHAPE_API_SECRET", "")
-credentials = OnshapeCredentials(access_key=_ak, secret_key=_sk)
+# Initialize Onshape client.
+# OAuth mode (free plan): credentials are read from the token file written by
+#   `onshape-mcp --auth`. No env vars required after the one-time auth step.
+#   You can still override with ONSHAPE_CLIENT_ID + ONSHAPE_CLIENT_SECRET env vars.
+# API-key mode (paid plan): set ONSHAPE_ACCESS_KEY/ONSHAPE_API_KEY + ONSHAPE_SECRET_KEY/ONSHAPE_API_SECRET.
+_client_id = os.getenv("ONSHAPE_CLIENT_ID", "")
+_client_secret = os.getenv("ONSHAPE_CLIENT_SECRET", "")
+
+if not (_client_id and _client_secret):
+    # Try loading client_id/secret from the saved token file (written by --auth).
+    from .api.oauth import load_tokens as _load_tokens
+    _saved = _load_tokens()
+    if _saved and _saved.client_id and _saved.client_secret:
+        _client_id = _saved.client_id
+        _client_secret = _saved.client_secret
+
+if _client_id and _client_secret:
+    credentials = OnshapeOAuthCredentials(client_id=_client_id, client_secret=_client_secret)
+else:
+    _ak = os.getenv("ONSHAPE_ACCESS_KEY") or os.getenv("ONSHAPE_API_KEY", "")
+    _sk = os.getenv("ONSHAPE_SECRET_KEY") or os.getenv("ONSHAPE_API_SECRET", "")
+    credentials = OnshapeCredentials(access_key=_ak, secret_key=_sk)
+
 client = OnshapeClient(credentials)
 partstudio_manager = PartStudioManager(client)
 variable_manager = VariableManager(client)
@@ -699,7 +716,11 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Create a new Onshape document. Returns the documentId AND the main workspaceId "
                 "AND the default Part Studio elementId in one shot — no need to follow up with "
-                "get_document_summary + find_part_studios before you start building."
+                "get_document_summary + find_part_studios before you start building. "
+                "NOTE: free-plan Onshape accounts can only create public documents. If creation "
+                "fails with a 409, the tool automatically retries with isPublic=true and notes "
+                "that in the response. Pass isPublic=false explicitly only if you have a paid "
+                "plan and want a private document."
             ),
             inputSchema={
                 "type": "object",
@@ -711,8 +732,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "isPublic": {
                         "type": "boolean",
-                        "description": "Whether the document should be public",
-                        "default": False,
+                        "description": (
+                            "Whether the document should be public. Free-plan accounts require "
+                            "true; omit this field and the tool will auto-retry as public if "
+                            "needed. Defaults to false (private) for paid plans."
+                        ),
                     },
                 },
                 "required": ["name"],
@@ -3593,11 +3617,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
 
     elif name == "create_document":
         try:
-            doc = await document_manager.create_document(
-                name=arguments["name"],
-                description=arguments.get("description"),
-                is_public=arguments.get("isPublic", False),
-            )
+            _is_public_arg = arguments.get("isPublic")  # None = caller didn't specify
+            _auto_made_public = False
+            try:
+                doc = await document_manager.create_document(
+                    name=arguments["name"],
+                    description=arguments.get("description"),
+                    is_public=bool(_is_public_arg) if _is_public_arg is not None else False,
+                )
+            except httpx.HTTPStatusError as _create_err:
+                # Free-plan accounts cannot create private documents (409).
+                # Auto-retry as public when the caller didn't explicitly pass
+                # isPublic=false, so free-plan users never see this error.
+                if (
+                    _create_err.response.status_code == 409
+                    and _is_public_arg is not False
+                ):
+                    doc = await document_manager.create_document(
+                        name=arguments["name"],
+                        description=arguments.get("description"),
+                        is_public=True,
+                    )
+                    _auto_made_public = True
+                else:
+                    raise
 
             workspace_id: Optional[str] = None
             part_studio_id: Optional[str] = None
@@ -3631,13 +3674,33 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
                 "part_studio_name": part_studio_name,
                 "tool": "create_document",
             }
+            if _auto_made_public:
+                payload["note"] = (
+                    "Document created as public because this Onshape account is on the free "
+                    "plan, which does not support private documents. Pass isPublic=true "
+                    "explicitly to suppress this note."
+                )
             return [TextContent(type="text", text=json.dumps(payload))]
         except httpx.HTTPStatusError as e:
             logger.error(f"API error creating document: {e.response.status_code}")
+            err_body = ""
+            try:
+                err_body = e.response.json().get("message", "")
+            except Exception:
+                pass
+            if e.response.status_code == 409:
+                hint = (
+                    " Free-plan accounts can only create public documents — pass "
+                    "isPublic=true. If you passed isPublic=false explicitly you must "
+                    "upgrade your Onshape plan or omit the field to let the tool retry "
+                    "automatically."
+                )
+            else:
+                hint = " Check your OAuth tokens or API credentials."
             return [
                 TextContent(
                     type="text",
-                    text=f"Error creating document: API returned {e.response.status_code}. Check your API credentials and permissions.",
+                    text=f"Error creating document: {e.response.status_code} {err_body}.{hint}",
                 )
             ]
         except Exception as e:
@@ -5290,6 +5353,33 @@ sse_app = create_sse_app()
 
 def main():
     """Main entry point - run stdio by default."""
+    # Handle OAuth authentication flow before starting the MCP server.
+    if "--auth" in sys.argv:
+        if not isinstance(credentials, OnshapeOAuthCredentials):
+            print(
+                "Error: --auth requires ONSHAPE_CLIENT_ID and ONSHAPE_CLIENT_SECRET to be set.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        from .api.oauth import run_auth_flow
+        run_auth_flow(credentials.client_id, credentials.client_secret)
+        return
+
+    # Pre-load OAuth tokens so the first tool call doesn't need to refresh.
+    if isinstance(credentials, OnshapeOAuthCredentials):
+        from .api.oauth import load_tokens, run_auth_flow
+        tokens = load_tokens()
+        if tokens is None:
+            print(
+                "No OAuth tokens found. Run the one-time auth command:\n"
+                "  ! uv --directory <plugin-root> run onshape-mcp --auth\n"
+                "Or set ONSHAPE_CLIENT_ID and ONSHAPE_CLIENT_SECRET, then run:\n"
+                "  ONSHAPE_CLIENT_ID=<id> ONSHAPE_CLIENT_SECRET=<secret> uv run onshape-mcp --auth",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        client._oauth_tokens = tokens
+
     # Check if we should run in SSE mode
     if "--sse" in sys.argv or os.getenv("MCP_TRANSPORT") == "sse":
         import uvicorn

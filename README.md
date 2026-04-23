@@ -59,20 +59,86 @@ benchmark data behind that workflow.
 /plugin install github:ReshefElisha/jarvis-onshape-mcp
 ```
 
-Claude Code will prompt you for:
-
-- `ONSHAPE_API_KEY` — the "Access Key" from the Onshape developer portal.
-- `ONSHAPE_API_SECRET` — the "Secret Key" shown once when you create the key pair.
-
-Get a key pair at [dev-portal.onshape.com](https://dev-portal.onshape.com/).
-Both values are stored in the OS keychain and never written to disk in plaintext.
-
 ### Requirements
 
 - [uv](https://docs.astral.sh/uv/) on your PATH (`brew install uv` or the
   official installer). The plugin launches its MCP server via `uv run`.
 - Claude Code desktop or CLI with plugin support.
 - An Onshape account.
+
+### Authentication: OAuth 2.0 (free plan)
+
+Use this method if you are on the Onshape free plan. API key pairs require a
+paid subscription; OAuth apps are available to all accounts.
+
+**Step 1 — Create an OAuth app in the Onshape developer portal.**
+
+1. Go to [cad.onshape.com/appstore/dev-portal/oauthApps/createNew](https://cad.onshape.com/appstore/dev-portal/oauthApps/createNew).
+2. Fill in the form:
+   - **Application name**: anything you like (e.g. `Jarvis MCP`)
+   - **Application type**: `Connected Desktop App`
+   - **Redirect URLs**: `http://localhost:8765/callback`
+   - **OAuth URL**: `http://localhost:8765/callback`
+   - **Permissions**: `Read your documents` and `Write your documents`
+3. Submit. The portal shows you a **Client ID** and **Client Secret** — copy
+   both.
+
+**Step 2 — Run the one-time authentication flow.**
+
+```bash
+cd /path/to/jarvis-onshape-mcp
+ONSHAPE_CLIENT_ID=<client_id> ONSHAPE_CLIENT_SECRET=<client_secret> uv run onshape-mcp --auth
+```
+
+Your browser opens the Onshape authorization page. After you approve the app,
+tokens are saved to:
+
+```
+~/.config/onshape-mcp/oauth_tokens.json   (Linux / macOS)
+%APPDATA%\onshape-mcp\oauth_tokens.json   (Windows, via XDG_CONFIG_HOME)
+```
+
+The file is created with `chmod 600` (owner read/write only). The access token
+is refreshed automatically when it expires; you only need to run `--auth` once
+unless you revoke the app.
+
+**Step 3 — Configure the MCP server.**
+
+Add the server to your Claude Code MCP config (`~/.claude/settings.json` or
+your project `.claude/settings.json`). No credentials needed here — they are
+read automatically from the token file written by `--auth`:
+
+```json
+{
+  "mcpServers": {
+    "onshape": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/jarvis-onshape-mcp", "run", "onshape-mcp"]
+    }
+  }
+}
+```
+
+### Authentication: API key pair (paid plan)
+
+If you have a paid Onshape subscription you can use API key pairs instead.
+Get a key pair at [dev-portal.onshape.com](https://dev-portal.onshape.com/) and
+set these environment variables (or use Claude Code's keychain prompt):
+
+```json
+{
+  "mcpServers": {
+    "onshape": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/jarvis-onshape-mcp", "run", "onshape-mcp"],
+      "env": {
+        "ONSHAPE_API_KEY": "<access_key>",
+        "ONSHAPE_API_SECRET": "<secret_key>"
+      }
+    }
+  }
+}
+```
 
 ## Quick start
 

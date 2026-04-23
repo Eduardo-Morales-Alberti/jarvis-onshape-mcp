@@ -1,17 +1,27 @@
 """Onshape API client for REST API communication."""
 
+import asyncio
 import base64
+import time
 import httpx
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from pydantic import BaseModel
 from loguru import logger
 
 
 class OnshapeCredentials(BaseModel):
-    """Onshape API credentials."""
+    """Onshape API key credentials (paid plans)."""
 
     access_key: str
     secret_key: str
+    base_url: str = "https://cad.onshape.com"
+
+
+class OnshapeOAuthCredentials(BaseModel):
+    """Onshape OAuth 2.0 credentials (free plan compatible)."""
+
+    client_id: str
+    client_secret: str
     base_url: str = "https://cad.onshape.com"
 
 
@@ -23,16 +33,18 @@ class OnshapeClient:
             result = await client.get("/api/v9/documents")
     """
 
-    def __init__(self, credentials: OnshapeCredentials):
+    def __init__(self, credentials: Union[OnshapeCredentials, OnshapeOAuthCredentials]):
         """Initialize the Onshape client.
 
         Args:
-            credentials: Onshape API credentials (access key and secret key)
+            credentials: API key credentials or OAuth credentials.
         """
         self.credentials = credentials
         self.base_url = credentials.base_url
         self._client: Optional[httpx.AsyncClient] = None
         self._own_client = False
+        # Populated on first use when in OAuth mode (loaded from disk / refreshed).
+        self._oauth_tokens = None
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -52,12 +64,37 @@ class OnshapeClient:
             self._client = httpx.AsyncClient(timeout=30.0)
             self._own_client = True
 
-    def _get_auth_header(self) -> str:
-        """Generate Basic Auth header from credentials.
+    async def _ensure_valid_token(self) -> None:
+        """Refresh OAuth access token if expired (no-op for API-key mode)."""
+        if not isinstance(self.credentials, OnshapeOAuthCredentials):
+            return
 
-        Returns:
-            Authorization header value
-        """
+        if self._oauth_tokens is None:
+            from .oauth import load_tokens
+            self._oauth_tokens = load_tokens()
+
+        if self._oauth_tokens is None:
+            raise RuntimeError(
+                "No OAuth tokens found. Run `onshape-mcp --auth` to authenticate first."
+            )
+
+        if time.time() >= self._oauth_tokens.expires_at - 60:
+            from .oauth import refresh_access_token, save_tokens
+            creds = self.credentials
+            self._oauth_tokens = await asyncio.to_thread(
+                refresh_access_token,
+                creds.client_id,
+                creds.client_secret,
+                self._oauth_tokens.refresh_token,
+            )
+            save_tokens(self._oauth_tokens)
+
+    def _get_auth_header(self) -> str:
+        """Return the Authorization header value for the current credential mode."""
+        if isinstance(self.credentials, OnshapeOAuthCredentials):
+            if self._oauth_tokens is None:
+                raise RuntimeError("OAuth tokens not loaded. Call _ensure_valid_token() first.")
+            return f"Bearer {self._oauth_tokens.access_token}"
         auth_string = f"{self.credentials.access_key}:{self.credentials.secret_key}"
         encoded = base64.b64encode(auth_string.encode()).decode()
         return f"Basic {encoded}"
@@ -105,6 +142,7 @@ class OnshapeClient:
             JSON response data
         """
         url = f"{self.base_url}{path}"
+        await self._ensure_valid_token()
         headers = {
             "Authorization": self._get_auth_header(),
             "Accept": "application/json;charset=UTF-8; qs=0.09",
@@ -139,6 +177,7 @@ class OnshapeClient:
             Raw response bytes
         """
         url = f"{self.base_url}{path}"
+        await self._ensure_valid_token()
         headers = {
             "Authorization": self._get_auth_header(),
         }
@@ -169,6 +208,7 @@ class OnshapeClient:
             JSON response data
         """
         url = f"{self.base_url}{path}"
+        await self._ensure_valid_token()
         headers = {
             "Authorization": self._get_auth_header(),
             "Accept": "application/json;charset=UTF-8; qs=0.09",
@@ -211,6 +251,7 @@ class OnshapeClient:
             JSON response data
         """
         url = f"{self.base_url}{path}"
+        await self._ensure_valid_token()
         headers = {
             "Authorization": self._get_auth_header(),
             "Accept": "application/json;charset=UTF-8; qs=0.09",
