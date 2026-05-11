@@ -8,6 +8,40 @@ description: Protocols for driving Onshape CAD via the onshape-mcp plugin. Rende
 Loaded as context for any Claude session driving the Jarvis Onshape MCP plugin.
 Encodes the protocols that keep CAD builds from silently failing. Short, imperative.
 
+## Batch vs incremental: pick before you start
+
+Two workflows; choose based on whether the design is already known.
+
+**Batch (`build_features`)** — use when you can transcribe the whole
+feature tree up front: porting from another doc, replaying a fixture,
+working from a complete spec or screenshot, executing `examples/*.json`.
+Fire ONE call with all sketches + extrudes + fillets; the dispatcher
+chains them via NAMED REFS (`ref: "base"` → `sketchRef: "base"`) and
+takes `edgeFilter` for fillets so you don't pay a `list_entities`
+round-trip. Fail-fast: prior features stay on first ERROR so you can
+edit the spec and re-run the suffix. Reproducing the pillow-block fixture:
+**11 features in ~28 s**, vs. ~10-15 min via incremental tool calls.
+
+**Incremental** — use for live exploration where you need to render and
+inspect between features (visual reference matching, debugging a tricky
+sketch, parametric tuning). The `describe_part_studio` -> next step
+cadence below applies.
+
+Rule of thumb: >= 4 mutating calls planned to the same Part Studio with
+no inspection in between => batch. Anything where you need to look at
+geometry before deciding the next call => incremental. You can also
+**hybrid**: batch the obvious base (plate + corner fillets + datum),
+then go incremental for the tricky parts where you want eyes on every
+step.
+
+`build_features` quirks worth knowing:
+- Plane IDs are resolved server-side and cached per batch.
+- The `edgeFilter` runs AFTER the previous feature's regen — so a
+  `lengthRangeMm: [9.99, 10.01]` filter right after a 10mm BLIND
+  extrude on a rectangle correctly picks the 4 corner edges.
+- INFO is treated as success (matches the rest of the MCP). ERROR
+  halts the batch.
+
 ## Think out loud
 
 Before every non-trivial tool call (sketch, extrude, boolean, fillet,

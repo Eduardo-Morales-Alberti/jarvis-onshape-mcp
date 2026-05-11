@@ -36,6 +36,7 @@ from .api.feature_apply import (
     update_feature_params_and_check,
     FeatureApplyResult,
 )
+from .api.build_features import build_features as _build_features_batch
 from .api.entities import EntityManager
 from .api.describe import DescribeManager
 from .api.measurements import MeasurementManager
@@ -81,6 +82,21 @@ ToolSearch before calling). Use `describe_part_studio` as your verification
 loop after every mutation — it returns topology + multi-view renders in one
 call.
 
+## When the full feature list is already known: use `build_features`
+
+If you can transcribe the design as an ordered feature list (copying from
+another doc, working from a spec/screenshot, replaying a fixture), fire
+ONE `build_features` call instead of chaining 10+ create_sketch/extrude
+tool calls. The dispatcher resolves NAMED REFS (`ref: "base"` →
+`sketchRef: "base"`), takes `edgeFilter` for fillets (no `list_entities`
+round-trip), and is fail-fast (stops at the first ERROR, leaves prior
+features in place so you can fix the spec and re-run the remaining
+suffix). Supported ops: sketch_rect | sketch_rounded_rect | sketch |
+extrude | fillet. Reach for it whenever you'd otherwise issue more than
+~4 mutating calls in a row to the same Part Studio. Skip it for live
+exploration where you need to inspect geometry between features —
+`build_features` runs server-side without a describe between steps.
+
 ## Tool index
 
 ### Documents
@@ -112,6 +128,7 @@ list_entities, or from create_offset_plane).
 - create_linear_pattern / create_circular_pattern
 - write_featurescript_feature — escape hatch: threads, helices, sweeps, lofts, anything not primitive. Takes a complete FS source file.
 - update_feature — patch params on an existing feature (iteration)
+- build_features — batch path: apply a whole feature list (sketches + extrudes + fillets) in ONE call. See the callout at the top of this doc.
 
 ### Introspection (USE OFTEN)
 - describe_part_studio — topology + multi-view renders in one call. First stop after every mutation.
@@ -1673,6 +1690,107 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["documentId", "workspaceId", "elementId", "booleanType", "toolBodyIds"],
+            },
+        ),
+        Tool(
+            name="build_features",
+            description=(
+                "Apply a sequence of features in one MCP call. Use this to reproduce a known "
+                "design (transcribed feature list, ported from another doc, golden fixture) "
+                "without paying per-feature LLM thinking + network round-trip. The dispatcher "
+                "resolves NAMED REFS (`ref: \"base\"`) into the feature IDs Onshape mints, so "
+                "downstream extrudes reference earlier sketches by name. For fillets, pass an "
+                "`edgeFilter` (same fields as `list_entities`) and the tool resolves edge IDs "
+                "after the previous feature's regen — no extra round-trip needed.\n\n"
+                "Supported ops: sketch_rect | sketch_rounded_rect | sketch | extrude | fillet.\n\n"
+                "Fail-fast: stops at the first ERROR; prior features stay in the part studio so "
+                "you can fix the failing spec and re-run with the remaining suffix. INFO is "
+                "treated as success (matches the rest of the MCP)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "documentId": {"type": "string", "description": "Document ID"},
+                    "workspaceId": {"type": "string", "description": "Workspace ID"},
+                    "elementId": {"type": "string", "description": "Part Studio element ID"},
+                    "features": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": (
+                            "Ordered feature specs. Each item: "
+                            "{op, ref?, name?, ...op-specific fields}. "
+                            "Extrudes reference earlier sketches via `sketchRef` (the `ref` set on "
+                            "a prior sketch spec). Fillets accept `edgeIds` or `edgeFilter`."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": [
+                                        "sketch_rect",
+                                        "sketch_rounded_rect",
+                                        "sketch",
+                                        "extrude",
+                                        "fillet",
+                                    ],
+                                },
+                                "ref": {
+                                    "type": "string",
+                                    "description": "Optional name to register this feature under for later sketchRef lookup.",
+                                },
+                                "name": {"type": "string"},
+                                "plane": {
+                                    "type": "string",
+                                    "enum": ["Front", "Top", "Right"],
+                                },
+                                "corner1": {"type": "array", "items": {"type": ["number", "string"]}},
+                                "corner2": {"type": "array", "items": {"type": ["number", "string"]}},
+                                "cornerRadius": {"type": ["number", "string"]},
+                                "entities": {"type": "array"},
+                                "constraints": {"type": "array"},
+                                "sketchRef": {
+                                    "type": "string",
+                                    "description": "For extrude: name of an earlier sketch's `ref`.",
+                                },
+                                "sketchFeatureId": {"type": "string"},
+                                "operationType": {
+                                    "type": "string",
+                                    "enum": ["NEW", "ADD", "REMOVE", "INTERSECT"],
+                                },
+                                "endType": {"type": "string", "enum": ["BLIND", "SYMMETRIC"]},
+                                "depth": {"type": ["number", "string"]},
+                                "oppositeDirection": {"type": "boolean"},
+                                "radius": {"type": ["number", "string"]},
+                                "edgeIds": {"type": "array", "items": {"type": "string"}},
+                                "edgeFilter": {
+                                    "type": "object",
+                                    "description": "Edge selector. Same keys as list_entities.",
+                                    "properties": {
+                                        "geometryType": {"type": "string"},
+                                        "outwardAxis": {"type": "string"},
+                                        "atZmm": {"type": "number"},
+                                        "atZtolMm": {"type": "number"},
+                                        "radiusRangeMm": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                            "minItems": 2,
+                                            "maxItems": 2,
+                                        },
+                                        "lengthRangeMm": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                            "minItems": 2,
+                                            "maxItems": 2,
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["op"],
+                        },
+                    },
+                },
+                "required": ["documentId", "workspaceId", "elementId", "features"],
             },
         ),
         # === FeatureScript Tools ===
@@ -4577,6 +4695,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
             return [TextContent(type="text", text=_exception_json(e, tool_name=name, status_code=e.response.status_code))]
         except Exception as e:
             logger.exception("Unexpected error creating boolean")
+            return [TextContent(type="text", text=_exception_json(e, tool_name=name))]
+
+    elif name == "build_features":
+        try:
+            summary = await _build_features_batch(
+                client,
+                arguments["documentId"],
+                arguments["workspaceId"],
+                arguments["elementId"],
+                arguments["features"],
+            )
+            payload = {**summary, "tool": "build_features"}
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+        except httpx.HTTPStatusError as e:
+            return [TextContent(type="text", text=_exception_json(e, tool_name=name, status_code=e.response.status_code))]
+        except Exception as e:
+            logger.exception("Unexpected error in build_features")
             return [TextContent(type="text", text=_exception_json(e, tool_name=name))]
 
     elif name == "eval_featurescript":
