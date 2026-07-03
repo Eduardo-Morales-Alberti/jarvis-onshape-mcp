@@ -1767,6 +1767,10 @@ async def list_tools() -> list[Tool]:
                                     "type": "object",
                                     "description": "Edge selector. Same keys as list_entities.",
                                     "properties": {
+                                        "bodyIndex": {
+                                            "type": "integer",
+                                            "description": "0-based body to limit edge selection to. Omit to search all bodies (may over-select on multi-body parts).",
+                                        },
                                         "geometryType": {"type": "string"},
                                         "outwardAxis": {"type": "string"},
                                         "atZmm": {"type": "number"},

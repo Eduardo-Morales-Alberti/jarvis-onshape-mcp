@@ -13,10 +13,12 @@ Supported ops (covers the Resultado pillow-block test case):
   fillet  — accepts `edgeFilter` (geometryType + lengthRangeMm etc.) so the
             caller does not need a list_entities round-trip first
 
-Error policy: fail-fast. The first feature with `status != OK/INFO` halts
-the batch; prior features stay (so caller can inspect via describe). The
-return body lists every step's status so a re-run can pick up where it
-broke. INFO is treated as success (matches the rest of the MCP).
+Error policy: fail-fast. The first feature with `status == ERROR` (or a
+dispatch exception) halts the batch; prior features stay (so caller can
+inspect via describe). The return body lists every step's status so a re-run
+can pick up where it broke. INFO and WARNING are treated as
+continue-with-note: the feature built, so the batch proceeds and the note is
+surfaced in that step's record (`warning: true` + `error_message`).
 """
 
 from __future__ import annotations
@@ -43,28 +45,23 @@ class BuildContext:
         self.results: List[Dict[str, Any]] = []
         self._entity_mgr = EntityManager(client)
         self._partstudio_mgr = PartStudioManager(client)
-        self._plane_id_cache: Dict[str, str] = {}
 
     async def resolve_plane(
         self, spec: Dict[str, Any]
     ) -> tuple[str, SketchPlane]:
         """Resolve plane / faceId to (plane_id, SketchPlane enum).
 
-        Caches standard plane IDs per part studio — they don't change once
-        the Part Studio exists, so one fetch per plane name per batch is
-        enough.
+        Standard plane IDs are cached by PartStudioManager itself (keyed by
+        doc/ws/element/plane), so repeated lookups in a batch don't re-fetch.
         """
         face_id = spec.get("faceId")
         if face_id:
             return face_id, SketchPlane.FRONT
         plane_name = spec.get("plane", "Front")
-        cached = self._plane_id_cache.get(plane_name)
-        if cached is None:
-            cached = await self._partstudio_mgr.get_plane_id(
-                self.doc_id, self.ws_id, self.el_id, plane_name
-            )
-            self._plane_id_cache[plane_name] = cached
-        return cached, SketchPlane[plane_name.upper()]
+        plane_id = await self._partstudio_mgr.get_plane_id(
+            self.doc_id, self.ws_id, self.el_id, plane_name
+        )
+        return plane_id, SketchPlane[plane_name.upper()]
 
     def register(self, ref: Optional[str], feature_id: str) -> None:
         if ref:
@@ -97,6 +94,7 @@ class BuildContext:
             self.ws_id,
             self.el_id,
             kinds=["edges"],
+            body_index=edge_filter.get("bodyIndex"),
             geometry_type=edge_filter.get("geometryType"),
             outward_axis=edge_filter.get("outwardAxis"),
             at_z_mm=edge_filter.get("atZmm"),
@@ -342,8 +340,12 @@ async def build_features(
                 "results": ctx.results,
             }
 
-        _record(ctx, i, op, result, extra)
-        if result.ok:
+        # ok covers OK/INFO. WARNING built successfully too — Onshape just
+        # flagged a concern — so we continue the batch and surface the note
+        # instead of halting. Only ERROR (ok False and not WARNING) aborts.
+        is_warning = not result.ok and result.status == "WARNING"
+        _record(ctx, i, op, result, {**(extra or {}), "warning": True} if is_warning else extra)
+        if result.ok or is_warning:
             ctx.register(ref, result.feature_id)
         else:
             return {
@@ -355,10 +357,12 @@ async def build_features(
                 "results": ctx.results,
             }
 
+    warnings = [r for r in ctx.results if r.get("warning")]
     return {
         "ok": True,
         "completed_steps": len(features),
         "total_steps": len(features),
+        "warning_count": len(warnings),
         "refs": ctx.refs,
         "results": ctx.results,
     }

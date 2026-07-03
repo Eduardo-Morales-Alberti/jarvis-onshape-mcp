@@ -28,8 +28,10 @@ FeatureStatus = Literal["OK", "INFO", "WARNING", "ERROR", "UNKNOWN"]
 class FeatureApplyResult(BaseModel):
     """Structured result of applying (create/update) a feature.
 
-    `ok` is True iff `status == "OK"`. For WARNING, the feature built but
-    Onshape has a concern worth surfacing; `error_message` will carry it.
+    `ok` is True for `status in ("OK", "INFO")` — INFO means Onshape
+    auto-adjusted something but the feature built and downstream geometry is
+    valid. For WARNING, the feature built but Onshape has a concern worth
+    surfacing; `ok` is False and `error_message` will carry it.
 
     `changes` (when set) is a git-diff-style summary of what the feature
     altered in the part — volume delta, faces added/removed, bbox change,

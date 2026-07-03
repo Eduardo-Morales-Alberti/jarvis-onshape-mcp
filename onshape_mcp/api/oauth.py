@@ -70,6 +70,8 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
     # Class-level dict shared across instances; populated by the first callback.
     result: dict = {}
+    # Expected CSRF state, set by run_auth_flow before the server starts.
+    expected_state: str = ""
 
     def do_GET(self):
         if not self.path.startswith("/callback"):
@@ -79,6 +81,20 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
+
+        # Reject callbacks whose state doesn't match — guards against CSRF
+        # and stray requests hitting the local callback port.
+        returned_state = params.get("state", [""])[0]
+        if returned_state != _CallbackHandler.expected_state:
+            _CallbackHandler.result["error"] = "state_mismatch"
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><h2>Authentication failed: state mismatch</h2></body></html>"
+            )
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
 
         if "code" in params:
             _CallbackHandler.result["code"] = params["code"][0]
@@ -186,6 +202,7 @@ def run_auth_flow(client_id: str, client_secret: str) -> OAuthTokens:
     auth_url = f"{ONSHAPE_AUTH_URL}?{query}"
 
     _CallbackHandler.result = {}
+    _CallbackHandler.expected_state = state
     server = HTTPServer(("localhost", port), _CallbackHandler)
 
     print("\nOpening Onshape authorization page in your browser...", file=sys.stderr)
