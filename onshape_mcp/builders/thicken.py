@@ -118,7 +118,6 @@ class ThickenBuilder:
                     "queries": [
                         {
                             "btType": "BTMIndividualSketchRegionQuery-140",
-                            "queryStatement": None,
                             "filterInnerLoops": True,
                             "queryString": f'query = qSketchRegion(id + "{self.sketch_feature_id}", true);',
                             "featureId": self.sketch_feature_id,

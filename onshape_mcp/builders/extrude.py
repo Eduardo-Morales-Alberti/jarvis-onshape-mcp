@@ -134,7 +134,10 @@ class ExtrudeBuilder:
                         "queries": [
                             {
                                 "btType": "BTMIndividualSketchRegionQuery-140",
-                                "queryStatement": None,
+                                # NOTE: do NOT emit "queryStatement": None here.
+                                # Onshape v9 rejects a null queryStatement with
+                                # BTWeirdStringValueException (400). Omitting the
+                                # field entirely is accepted.
                                 "filterInnerLoops": True,
                                 "queryString": f'query = qSketchRegion(id + "{self.sketch_feature_id}", true);',
                                 "featureId": self.sketch_feature_id,
@@ -143,7 +146,6 @@ class ExtrudeBuilder:
                         ],
                         "parameterId": "entities",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterEnum-145",
@@ -152,7 +154,6 @@ class ExtrudeBuilder:
                         "value": self.operation_type.value,
                         "parameterId": "operationType",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterQuantity-147",
@@ -162,21 +163,18 @@ class ExtrudeBuilder:
                         "expression": depth_expression,
                         "parameterId": "depth",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterBoolean-144",
                         "value": self.opposite_direction,
                         "parameterId": "oppositeDirection",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterBoolean-144",
                         "value": self.end_type == ExtrudeEndType.SYMMETRIC,
                         "parameterId": "symmetric",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                 ],
             },

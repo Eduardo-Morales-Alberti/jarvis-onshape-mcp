@@ -110,13 +110,11 @@ class RevolveBuilder:
                 {
                     "btType": "BTMIndividualQuery-138",
                     "deterministicIds": [],
-                    "queryStatement": None,
                     "queryString": f'query = qCreatedBy(makeId("{axis_value}"), EntityType.EDGE);',
                 }
             ],
             "parameterId": "axis",
             "parameterName": "",
-            "libraryRelationType": "NONE",
         }
 
     def build(self) -> Dict[str, Any]:
@@ -149,7 +147,6 @@ class RevolveBuilder:
                         "queries": [
                             {
                                 "btType": "BTMIndividualSketchRegionQuery-140",
-                                "queryStatement": None,
                                 "filterInnerLoops": True,
                                 "queryString": (
                                     f'query = qSketchRegion(id + "{self.sketch_feature_id}"'
@@ -161,7 +158,6 @@ class RevolveBuilder:
                         ],
                         "parameterId": "entities",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     self._build_axis_query(),
                     {
@@ -171,7 +167,6 @@ class RevolveBuilder:
                         "value": self.operation_type.value,
                         "parameterId": "operationType",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterQuantity-147",
@@ -181,14 +176,12 @@ class RevolveBuilder:
                         "expression": angle_expression,
                         "parameterId": "revolveAngle",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                     {
                         "btType": "BTMParameterBoolean-144",
                         "value": self.opposite_direction,
                         "parameterId": "oppositeDirection",
                         "parameterName": "",
-                        "libraryRelationType": "NONE",
                     },
                 ],
             },

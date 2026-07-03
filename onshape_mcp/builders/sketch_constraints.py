@@ -62,7 +62,10 @@ def _ref_param(parameter_id: str, entity_ref: str) -> Dict[str, Any]:
         "value": entity_ref,
         "parameterId": parameter_id,
         "parameterName": "",
-        "libraryRelationType": "NONE",
+        # NOTE: do NOT emit "libraryRelationType" on ANY BTMParameter* dict.
+        # Onshape v9 rejects the field with BTWeirdStringValueException (400)
+        # on every parameter type probed (String-149, QueryList-148, Enum-145).
+        # Same API-strictness change as the null-queryStatement rejection.
     }
 
 
@@ -80,7 +83,6 @@ def _quantity_param(parameter_id: str, expression: str) -> Dict[str, Any]:
         "expression": expression,
         "parameterId": parameter_id,
         "parameterName": "",
-        "libraryRelationType": "NONE",
     }
 
 
@@ -92,7 +94,6 @@ def _enum_param(parameter_id: str, enum_name: str, value: str) -> Dict[str, Any]
         "value": value,
         "parameterId": parameter_id,
         "parameterName": "",
-        "libraryRelationType": "NONE",
     }
 
 

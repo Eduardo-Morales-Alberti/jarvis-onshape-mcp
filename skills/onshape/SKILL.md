@@ -39,8 +39,73 @@ step.
 - The `edgeFilter` runs AFTER the previous feature's regen — so a
   `lengthRangeMm: [9.99, 10.01]` filter right after a 10mm BLIND
   extrude on a rectangle correctly picks the 4 corner edges.
-- INFO is treated as success (matches the rest of the MCP). ERROR
-  halts the batch.
+- INFO and WARNING are treated as continue-with-note: the feature
+  built, so the batch proceeds and the note is surfaced in that step's
+  record (`warning: true` + `error_message`); the success payload
+  carries `warning_count`. Only ERROR halts the batch.
+- Fillet `edgeFilter` accepts `bodyIndex` (0-based) to scope selection
+  to one body — pass it on multi-body parts to avoid over-selecting
+  edges across every body.
+
+## Modeling from a reference image: the `designs/` workspace
+
+When the user drops an image and asks you to model it, use the per-design
+workspace under `designs/` (see `designs/README.md`). Copy `designs/_template/`
+to `designs/<part-name>/` and drive the loop:
+
+1. Run the `vision-decompose` skill on the image → write the feature tree and
+   its gotchas into `designs/<part-name>/steps.md`.
+2. Distill that into `designs/<part-name>/spec.json` (a `build_features`
+   payload).
+3. Fire ONE `build_features` from the spec, then `describe_part_studio` to
+   verify against the reference.
+4. Append a record to `designs/<part-name>/runs.jsonl`: `tool_calls`,
+   `wall_clock_s`, `errors`, `failed_at_index`, `fixes_applied`,
+   `next_iteration_notes`.
+
+Before RE-generating a design, read its `steps.md` (so you reuse the known
+dimensions and gotchas instead of re-deriving from pixels) and the last
+`runs.jsonl` line (so you don't repeat the previous attempt's error). This is
+how the per-design folder converges on a first-try-correct spec while call
+count and wall-clock drop run over run.
+
+Escalation: a gotcha that recurs across MANY designs (not one specific part)
+belongs in THIS file as a protocol, not just in a per-design `steps.md` — pull
+it up so every future build benefits.
+
+Cross-design lessons pulled up from `designs/speedcad-t3-2/`:
+
+- **Decode the orthographic side/front view for Z-levels FIRST.** Multi-height
+  parts (stacked bosses, base + raised features) encode their heights in the side
+  view. Extract every distinct top-face height before you touch the top-view
+  profile. Assuming uniform thickness is the classic miss.
+- **Multi-arc profiles: compute junctions exactly AND stitch with COINCIDENT.**
+  Script the geometry (circle intersections, tangent points) at full float64
+  precision so shared endpoints are mathematically identical — never hand-round
+  arc centres/angles — then add a COINCIDENT constraint at every junction as
+  solver insurance. Generate the COINCIDENTs by matching computed endpoint
+  coordinates, not by hand bookkeeping of `.start`/`.end`. An arc whose CCW
+  sweep exceeds 180° MUST carry `short_arc: false` or the builder silently
+  flips it to the complementary arc.
+- Read OD+bore pairs as ring bosses; a repeated linear dim (three "7"s) as a
+  feature width; a repeated radius (three "R45"s) as an arc feature — not a solid
+  blend.
+- **MCP has no region-selective extrude — rebuild multi-height parts as an
+  ADDITIVE STACK.** When every level shares the base plane (the common SpeedCAD
+  pattern), sketch everything on Top and extrude up from z=0: full footprint NEW
+  at the LOWEST height, then re-ADD each taller region (arms, bosses) at its own
+  height, bores as one REMOVE SYMMETRIC through-all at the end. Intermediate
+  profiles may overcut regions a later ADD restores (e.g. arm end caps ending
+  inside a boss circle) — exploit that to keep profiles simple. No offset planes
+  or recess cuts needed, so the whole part stays one `build_features` batch.
+- **HTTP 400 with `BTWeirdStringValueException` = legacy payload field, not your
+  geometry.** Onshape v9 rejects builder payloads carrying `libraryRelationType`
+  on any `BTMParameter*` dict and null `queryStatement` on queries (both removed
+  from the builders 2026-07-03). If a formerly-working tool starts 400ing, probe
+  the raw endpoint and read the Jackson reference chain — it names the offending
+  field. Don't burn cycles re-deriving geometry when the deserializer is what
+  changed; and remember the running MCP server needs a restart to pick up
+  builder fixes.
 
 ## Think out loud
 
