@@ -38,6 +38,8 @@ References:
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -167,9 +169,11 @@ class CustomFeatureManager:
         feature_type: str,
         feature_name: str,
         parameters: Optional[List[Dict[str, Any]]] = None,
+        feature_id: Optional[str] = None,
     ) -> FeatureApplyResult:
         """POST a BTMFeature-134 that invokes `feature_type` from the given
-        Feature Studio. Routed through `apply_feature_and_check` so regen
+        Feature Studio. With `feature_id`, the existing instance is updated in
+        place (new namespace + parameters) instead of adding a feature. Routed through `apply_feature_and_check` so regen
         status comes back cleanly.
 
         `parameters` is a list of `{id, type, value}` dicts — we convert each
@@ -203,6 +207,8 @@ class CustomFeatureManager:
                 "parameters": onshape_params,
             },
         }
+        if feature_id:
+            payload["feature"]["featureId"] = feature_id
 
         logger.debug(
             "instantiate_custom_feature featureType={} namespace={!r} "
@@ -218,7 +224,8 @@ class CustomFeatureManager:
             workspace_id,
             part_studio_element_id,
             payload,
-            operation="create",
+            operation="update" if feature_id else "create",
+            feature_id=feature_id,
         )
 
     # ---- One-call convenience -------------------------------------------
@@ -234,9 +241,12 @@ class CustomFeatureManager:
         feature_name: str,
         parameters: Optional[List[Dict[str, Any]]] = None,
         fs_element_name: Optional[str] = None,
+        fs_element_id: Optional[str] = None,
+        feature_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """End-to-end: create a fresh FS element, write the source, and
-        instantiate the feature. Returns a dict carrying both the regen
+        """End-to-end: create a fresh FS element (or reuse `fs_element_id`),
+        write the source, and instantiate the feature (or update `feature_id`
+        in place). Returns a dict carrying both the regen
         FeatureApplyResult and the FS element id (so callers can inspect
         the uploaded source if debugging).
 
@@ -245,10 +255,13 @@ class CustomFeatureManager:
         a top-level name equal to `feature_type`. The worked example in the
         tool description shows the minimum boilerplate.
         """
-        fs_name = fs_element_name or f"ClaudeFS_{feature_type}"
-        fs_eid = await self.create_feature_studio(
-            document_id, workspace_id, fs_name
-        )
+        if fs_element_id:
+            fs_eid = fs_element_id
+        else:
+            fs_name = fs_element_name or f"ClaudeFS_{feature_type}"
+            fs_eid = await self.create_feature_studio(
+                document_id, workspace_id, fs_name
+            )
         upload_resp = await self.upload_fs_source(
             document_id, workspace_id, fs_eid, feature_script
         )
@@ -298,6 +311,7 @@ class CustomFeatureManager:
             feature_type=feature_type,
             feature_name=feature_name,
             parameters=parameters,
+            feature_id=feature_id,
         )
 
         # FS-error enrichment: when the feature compiled but failed at REGEN,
@@ -337,6 +351,72 @@ class CustomFeatureManager:
 
 
 # ---- helpers ---------------------------------------------------------------
+
+MAX_FS_SOURCE_BYTES = 1_000_000
+
+
+def read_post_eval_script(script: Optional[str] = None, script_path: Optional[str] = None) -> Optional[str]:
+    """FS lambda to evaluate right after the feature regenerates (e.g. a
+    mass / body-count check), inline or from an absolute file path."""
+    if script and script_path:
+        raise ValueError("pass at most one of postEvalScript or postEvalScriptPath")
+    if script_path:
+        if not os.path.isabs(script_path) or not os.path.isfile(script_path):
+            raise ValueError(f"postEvalScriptPath must be an existing absolute path: {script_path!r}")
+        with open(script_path, encoding="utf-8") as f:
+            return f.read()
+    return script or None
+
+
+def fs_value_to_python(value: Any) -> Any:
+    """Flatten a BTFSValue* tree from /featurescript into plain JSON values."""
+    if not isinstance(value, dict):
+        return value
+    bt = value.get("btType", "")
+    v = value.get("value")
+    if bt.endswith("BTFSValueMap"):
+        return {str(fs_value_to_python(e.get("key"))): fs_value_to_python(e.get("value")) for e in v or []}
+    if bt.endswith("BTFSValueArray"):
+        return [fs_value_to_python(e) for e in v or []]
+    return v
+
+
+def resolve_featurescript_inputs(
+    feature_script: Optional[str] = None,
+    feature_script_path: Optional[str] = None,
+    feature_type: Optional[str] = None,
+    parameters: Optional[List[Dict[str, Any]]] = None,
+    parameters_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve the source, feature type and parameters of a custom feature,
+    either inline or from files on the MCP host (so large generated sources
+    never pass through the model). Explicit arguments win over the
+    parameters file. Returns {feature_script, feature_type, parameters}."""
+    if bool(feature_script) == bool(feature_script_path):
+        raise ValueError("pass exactly one of featureScript or featureScriptPath")
+    if feature_script_path:
+        if not os.path.isabs(feature_script_path) or not feature_script_path.endswith(".fs"):
+            raise ValueError(f"featureScriptPath must be an absolute path to a .fs file: {feature_script_path!r}")
+        if not os.path.isfile(feature_script_path):
+            raise ValueError(f"featureScriptPath not found: {feature_script_path}")
+        if os.path.getsize(feature_script_path) > MAX_FS_SOURCE_BYTES:
+            raise ValueError(f"featureScriptPath larger than {MAX_FS_SOURCE_BYTES} bytes")
+        with open(feature_script_path, encoding="utf-8") as f:
+            feature_script = f.read()
+    if parameters_path:
+        if not os.path.isabs(parameters_path) or not os.path.isfile(parameters_path):
+            raise ValueError(f"parametersPath must be an existing absolute path: {parameters_path!r}")
+        with open(parameters_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("parameters", []), list):
+            raise ValueError("parametersPath must hold {featureType?, parameters: [...]}")
+        feature_type = feature_type or data.get("featureType")
+        if parameters is None:
+            parameters = data.get("parameters", [])
+    if not feature_type:
+        raise ValueError("featureType is required (argument or parametersPath)")
+    return {"feature_script": feature_script, "feature_type": feature_type,
+            "parameters": parameters}
 
 
 def _build_namespace(fs_element_id: str, source_microversion_id: str) -> str:

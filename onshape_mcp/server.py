@@ -40,7 +40,8 @@ from .api.build_features import build_features as _build_features_batch
 from .api.entities import EntityManager
 from .api.describe import DescribeManager
 from .api.measurements import MeasurementManager
-from .api.custom_features import CustomFeatureManager, DEFAULT_FS_VERSION
+from .api.custom_features import (CustomFeatureManager, DEFAULT_FS_VERSION, fs_value_to_python,
+                                  read_post_eval_script, resolve_featurescript_inputs)
 from .api.drawing_ocr import callouts_to_dict, extract_callouts
 from .api.rendering import (
     ShadedViewManager,
@@ -2363,7 +2364,14 @@ async def list_tools() -> list[Tool]:
                 "```\n"
                 "`parameters` is a list of `{id, type, value}` dicts to bind "
                 "precondition variables. type ∈ {quantity, string, boolean, real}. "
-                "For quantity, value is a unit-tagged string like \"25 mm\" or \"0.5 in\"."
+                "For quantity, value is a unit-tagged string like \"25 mm\" or \"0.5 in\".\n\n"
+                "Large or generated sources: pass `featureScriptPath` (absolute path to a "
+                ".fs file on this machine) instead of `featureScript`, and optionally "
+                "`parametersPath` (JSON {featureType?, parameters}) instead of "
+                "`featureType`/`parameters`; the server reads the files so the source "
+                "never goes through the conversation. To iterate without creating new "
+                "elements, pass `fsElementId` (reuse that Feature Studio) and `featureId` "
+                "(update that feature instance in place); both come back in the response."
             ),
             inputSchema={
                 "type": "object",
@@ -2377,7 +2385,31 @@ async def list_tools() -> list[Tool]:
                     },
                     "featureScript": {
                         "type": "string",
-                        "description": "Complete FS source. Must start with `FeatureScript <N>;` where N is the current std library version (currently 2909).",
+                        "description": "Complete FS source. Must start with `FeatureScript <N>;` where N is the current std library version (currently 2909). Exclusive with featureScriptPath.",
+                    },
+                    "featureScriptPath": {
+                        "type": "string",
+                        "description": "Absolute path to a .fs file read by the server (max 1 MB). Exclusive with featureScript.",
+                    },
+                    "parametersPath": {
+                        "type": "string",
+                        "description": "Absolute path to a JSON file {featureType?, parameters: [...]}; explicit featureType/parameters arguments win.",
+                    },
+                    "fsElementId": {
+                        "type": "string",
+                        "description": "Reuse this Feature Studio element (upload the new source into it) instead of creating one.",
+                    },
+                    "featureId": {
+                        "type": "string",
+                        "description": "Update this existing custom-feature instance in place instead of adding a new feature.",
+                    },
+                    "postEvalScript": {
+                        "type": "string",
+                        "description": "FS lambda evaluated right after the feature regenerates (read-only), e.g. a mass check; its result comes back as `post_eval`.",
+                    },
+                    "postEvalScriptPath": {
+                        "type": "string",
+                        "description": "Absolute path to a file holding the postEvalScript lambda.",
                     },
                     "featureName": {
                         "type": "string",
@@ -2405,8 +2437,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": [
-                    "documentId", "workspaceId", "elementId",
-                    "featureType", "featureScript", "featureName",
+                    "documentId", "workspaceId", "elementId", "featureName",
                 ],
             },
         ),
@@ -5410,15 +5441,24 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
 
     elif name == "write_featurescript_feature":
         try:
+            inputs = resolve_featurescript_inputs(
+                feature_script=arguments.get("featureScript"),
+                feature_script_path=arguments.get("featureScriptPath"),
+                feature_type=arguments.get("featureType"),
+                parameters=arguments.get("parameters"),
+                parameters_path=arguments.get("parametersPath"),
+            )
             out = await custom_feature_manager.apply_featurescript_feature(
                 document_id=arguments["documentId"],
                 workspace_id=arguments["workspaceId"],
                 part_studio_element_id=arguments["elementId"],
-                feature_type=arguments["featureType"],
-                feature_script=arguments["featureScript"],
+                feature_type=inputs["feature_type"],
+                feature_script=inputs["feature_script"],
                 feature_name=arguments["featureName"],
-                parameters=arguments.get("parameters"),
+                parameters=inputs["parameters"],
                 fs_element_name=arguments.get("fsElementName"),
+                fs_element_id=arguments.get("fsElementId"),
+                feature_id=arguments.get("featureId"),
             )
             apply = out["apply_result"]
             payload = {
@@ -5432,6 +5472,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
                 "source_microversion_id": out.get("source_microversion_id"),
                 "tool": "write_featurescript_feature",
             }
+            post = read_post_eval_script(arguments.get("postEvalScript"), arguments.get("postEvalScriptPath"))
+            if post and apply.status != "ERROR":
+                try:
+                    res = await featurescript_manager.evaluate(
+                        arguments["documentId"], arguments["workspaceId"], arguments["elementId"], post)
+                    payload["post_eval"] = fs_value_to_python(res.get("result"))
+                    if res.get("notices"):
+                        payload["post_eval_notices"] = res["notices"]
+                except Exception as e:  # noqa: BLE001
+                    payload["post_eval_error"] = str(e)
             return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
         except httpx.HTTPStatusError as e:
             return [TextContent(type="text", text=_exception_json(e, tool_name=name, status_code=e.response.status_code))]
