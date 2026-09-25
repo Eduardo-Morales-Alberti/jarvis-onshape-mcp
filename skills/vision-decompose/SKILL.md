@@ -1,6 +1,6 @@
 ---
 name: vision-decompose
-description: Look at an engineering reference image (drawing, iso render, photo) and produce a structured feature decomposition BEFORE building anything in Onshape. Output is a feature tree the user can review and the build phase can execute against. Use this whenever the user gives you a reference image and asks you to model it. Skip if the user has already described the part in plain text.
+description: Look at an engineering reference image (drawing, iso render, photo) and produce a structured feature decomposition BEFORE building anything in Onshape. Output is a feature tree the user can review and the build phase can execute against. Use it when the user gives a reference image and wants it modeled step by step with the primitive MCP tools (sketch/extrude calls, interactive). For a dimensioned drawing that should become one parametric FeatureScript feature validated by mass, use drawing-to-onshape instead. Skip if the user has already described the part in plain text.
 ---
 
 # CAD Vision Decomposition — describe before you build

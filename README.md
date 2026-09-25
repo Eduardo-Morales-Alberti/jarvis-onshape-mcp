@@ -153,7 +153,7 @@ regen warnings. If it takes a wrong direction on an extrude, the
 
 ## Protocol guide
 
-Two plugin skills auto-discovered by Claude Code:
+Plugin skills auto-discovered by Claude Code:
 
 - `skills/onshape/SKILL.md` — **CAD build skill**. Loaded into every Onshape
   session. Covers units (bare numbers in mm), coordinate frames (Front is XZ
@@ -168,6 +168,24 @@ Two plugin skills auto-discovered by Claude Code:
   Output is a feature tree (type, role, size, position, face) the user can
   review before committing turns to the build. See "Recommended workflow"
   below.
+
+- **Drawing → parametric FeatureScript pipeline** (three skills that work together):
+  - `skills/drawing-to-onshape/SKILL.md`: entry point. Timed turn plan from a
+    dimensioned drawing to one custom feature in Onshape whose mass matches the
+    drawing (typically 35-130 s per part once the feature types are supported).
+  - `skills/design-to-sketch/SKILL.md`: drawing → `design.py` → `sketches.json`
+    (schema `sketchgen/1`): parametric sketches with Onshape-named constraints,
+    extrude / revolve hints, circular patterns, offset planes, a validated build
+    order, and a one-image overlay review. Pure-stdlib `sketchgen` library plus
+    worked examples in `examples/`.
+  - `skills/sketch-to-featurescript/SKILL.md`: `sketches.json` → one parametric
+    custom feature (`json_to_fs.py`), uploaded by path with
+    `write_featurescript_feature` (`featureScriptPath`, `parametersPath`,
+    `fsElementId`/`featureId` to update in place, `postEvalScriptPath` for the
+    mass verdict). `reference/fs-mapping.md` records the FeatureScript behaviour
+    verified live (e.g. `skSolve` ignores ANGLE and MIDPOINT).
+  - Part data (`designs/<part>/`, `designs/onshape.json`) lives in the user's
+    project, not in the plugin. Tests: `tests/skills/`.
 
 You can load either into any Claude session as a system prompt to get the
 same behavior outside the plugin context.
